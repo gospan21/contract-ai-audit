@@ -1,0 +1,335 @@
+import OpenAI from "openai";
+2
+import { zodTextFormat } from "openai/helpers/zod";
+3
+import { z } from "zod";
+4
+import { AuditResult, DocumentType } from "./types";
+5
+ 
+6
+const openai = new OpenAI({
+7
+apiKey: process.env.OPENAI_API_KEY
+8
+});
+9
+ 
+10
+const RiskSchema = z.object({
+11
+level: z.enum(["critical", "warning", "safe"]),
+12
+title: z.string(),
+13
+clause: z.string(),
+14
+finding: z.string(),
+15
+recommendation: z.string(),
+16
+replacementText: z.string(),
+17
+evidence: z.string()
+18
+});
+19
+ 
+20
+const ContractAuditSchema = z.object({
+21
+executiveSummary: z.string(),
+22
+risks: z.array(RiskSchema)
+23
+});
+24
+ 
+25
+type AiRisk = z.infer<typeof RiskSchema>;
+26
+ 
+27
+const documentLabels: Record<DocumentType, string> = {
+28
+supply: "Договор поставки",
+29
+nda: "NDA",
+30
+it: "ИТ-подряд",
+31
+procurement: "Закупки"
+32
+};
+33
+ 
+34
+function calculateSummary(risks: AiRisk[]) {
+35
+const critical = risks.filter((risk) => risk.level === "critical").length;
+36
+const warning = risks.filter((risk) => risk.level === "warning").length;
+37
+const safe = risks.filter((risk) => risk.level === "safe").length;
+38
+ 
+39
+const score = Math.max(
+40
+0,
+41
+Math.min(100, 100 - critical * 18 - warning * 8 + safe * 4)
+42
+);
+43
+ 
+44
+return {
+45
+critical,
+46
+warning,
+47
+safe,
+48
+score
+49
+};
+50
+}
+51
+ 
+52
+function limitContractText(text: string) {
+53
+const normalized = text.replace(/\s+/g, " ").trim();
+54
+ 
+55
+if (normalized.length <= 60000) {
+56
+return normalized;
+57
+}
+58
+ 
+59
+return normalized.slice(0, 60000);
+60
+}
+61
+ 
+62
+export async function runAiAudit(
+63
+fileName: string,
+64
+documentType: DocumentType,
+65
+extractedText: string
+66
+): Promise<AuditResult> {
+67
+if (!process.env.OPENAI_API_KEY) {
+68
+throw new Error(
+69
+"OPENAI_API_KEY не найден. Добавьте ключ в .env.local локально или в Environment Variables на Vercel."
+70
+);
+71
+}
+72
+ 
+73
+const contractText = limitContractText(extractedText);
+74
+ 
+75
+const response = await openai.responses.parse({
+76
+model: process.env.OPENAI_MODEL || "gpt-4o-2024-08-06",
+77
+input: [
+78
+{
+79
+role: "system",
+80
+content:
+81
+"Ты опытный корпоративный юрист и LegalTech AI-аудитор. Анализируй договоры строго по тексту документа. Не выдумывай факты. Если условие отсутствует, прямо укажи, что оно не обнаружено. Ответ всегда возвращай строго в заданной JSON-структуре."
+82
+},
+83
+{
+84
+role: "user",
+85
+content: `
+86
+Проанализируй договор на русском языке.
+87
+ 
+88
+Тип документа: ${documentLabels[documentType]}
+89
+ 
+90
+Цель анализа:
+91
+Найти юридические, финансовые, операционные и коммерческие риски в договоре.
+92
+ 
+93
+Проверь обязательно:
+94
+1. Предмет договора.
+95
+2. Сроки исполнения.
+96
+3. Сроки оплаты.
+97
+4. Ответственность сторон.
+98
+5. Штрафы, пеня, неустойка.
+99
+6. Ограничение ответственности.
+100
+7. Одностороннее расторжение.
+101
+8. Порядок приемки работ, услуг или товара.
+102
+9. Конфиденциальность.
+103
+10. Персональные данные, если встречаются.
+104
+11. Интеллектуальная собственность, если применимо.
+105
+12. SLA, качество услуг, гарантийные обязательства.
+106
+13. Форс-мажор.
+107
+14. Подсудность и применимое право.
+108
+15. Закупочные, санкционные, антикоррупционные и compliance-риски.
+109
+16. Неясные, односторонние, опасные или слишком широкие формулировки.
+110
+17. Отсутствующие важные условия для данного типа договора.
+111
+ 
+112
+Для каждого найденного пункта верни:
+113
+- level:
+114
+- critical, если риск может привести к существенным убыткам, спору, потере прав, неоплате, неограниченной ответственности или невозможности защитить интересы стороны;
+115
+- warning, если условие требует уточнения, детализации или может создать спор;
+116
+- safe, если важный блок договора выглядит приемлемо.
+117
+- title: короткое название риска или проверки.
+118
+- clause: раздел договора или тема.
+119
+- finding: что именно найдено или чего не хватает.
+120
+- recommendation: что нужно сделать.
+121
+- replacementText: готовая улучшенная формулировка для договора.
+122
+- evidence: точный фрагмент договора или объяснение, почему сделан вывод.
+123
+ 
+124
+Правила:
+125
+- Не называй это юридическим заключением.
+126
+- Не выдумывай условия, которых нет в тексте.
+127
+- Если текст содержит неоднозначную формулировку, объясни риск простым деловым языком.
+128
+- Если условие отсутствует, evidence должно указывать: "Условие не обнаружено в предоставленном тексте".
+129
+- Верни минимум 6 и максимум 15 пунктов.
+130
+- Пиши на русском языке.
+131
+- Стиль: B2B, понятно для собственника бизнеса, руководителя закупок и юриста.
+132
+ 
+133
+Текст договора:
+134
+${contractText}
+135
+`
+136
+}
+137
+],
+138
+text: {
+139
+format: zodTextFormat(ContractAuditSchema, "contract_audit")
+140
+}
+141
+});
+142
+ 
+143
+const parsed = response.output_parsed;
+144
+ 
+145
+if (!parsed) {
+146
+throw new Error("GPT-4o не вернул структурированный результат аудита.");
+147
+}
+148
+ 
+149
+const risks = parsed.risks.map((risk, index) => ({
+150
+id: `ai-risk-${index + 1}`,
+151
+level: risk.level,
+152
+title: risk.title,
+153
+clause: risk.clause,
+154
+finding: risk.finding,
+155
+recommendation: risk.recommendation,
+156
+replacementText: risk.replacementText,
+157
+evidence: risk.evidence
+158
+}));
+159
+ 
+160
+return {
+161
+fileName,
+162
+documentType,
+163
+extractedText,
+164
+risks,
+165
+summary: calculateSummary(parsed.risks),
+166
+auditedAt: new Date().toISOString()
+167
+};
+168
+}
