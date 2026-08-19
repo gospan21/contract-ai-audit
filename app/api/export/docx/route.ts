@@ -36,7 +36,7 @@ export async function POST(request: NextRequest) {
   const doc = new Document({ sections: [{ children }] });
   const buffer = await Packer.toBuffer(doc);
 
-  return new Response(buffer, {
+  return new Response(new Uint8Array(buffer), {
     headers: {
       "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       "Content-Disposition": `attachment; filename="contract-audit-report.docx"`
