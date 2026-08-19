@@ -10,6 +10,7 @@ async function extractText(file: File): Promise<string> {
   const lowerName = file.name.toLowerCase();
 
   if (file.type === "application/pdf" || lowerName.endsWith(".pdf")) {
+    // @ts-ignore
     const pdfParse = (await import("pdf-parse")).default;
     const parsed = await pdfParse(buffer);
     return parsed.text || "";
